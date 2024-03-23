@@ -1,0 +1,191 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: disallow-blocking-pdb
+  annotations:
+    policies.kyverno.io/title: Check PodDisruptionBudget aligns with Deployment or StatefulSet and vice-versa
+    policies.kyverno.io/category: Other
+    kyverno.io/kyverno-version: 1.9.0
+    kyverno.io/kubernetes-version: "1.24"
+    policies.kyverno.io/subject: PodDisruptionBudget, Deployment, StatefulSet
+    policies.kyverno.io/description: >-
+      When a Pod controller which can run multiple replicas is subject to an active PodDisruptionBudget,
+      if the replicas field has a value equal to the minAvailable value of the PodDisruptionBudget
+      it may prevent voluntary disruptions including Node drains which may impact routine maintenance
+      tasks and disrupt operations. This policy checks incoming Deployments and StatefulSets which have
+      a matching PodDisruptionBudget to ensure these two values do not match.
+spec:
+  validationFailureAction: Enforce
+  background: false
+  failurePolicy: Fail
+  rules:
+    - name: minavailable-deploymentstatfulset-vs-pdb
+      match:
+        any:
+          - resources:
+              kinds:
+                - Deployment
+                - StatefulSet
+      preconditions:
+        all:
+          - key: "{{request.operation || 'BACKGROUND'}}"
+            operator: AnyIn
+            value:
+              - CREATE
+              - UPDATE
+          - key: "{{ request.object.spec.replicas || `1` }}"
+            operator: GreaterThan
+            value: 0
+      context:
+        - name: minavailable
+          apiCall:
+            urlPath: "/apis/policy/v1/namespaces/{{request.namespace}}/poddisruptionbudgets"
+            jmesPath: "items[?label_match(spec.selector.matchLabels, `{{request.object.spec.template.metadata.labels}}`)] | [0] | spec.minAvailable || `0`"
+      validate:
+        message: >-
+          The matching PodDisruptionBudget for this resource has its minAvailable value equal to the replica count which is not permitted.
+          Please seek a member of the Application Platform Team if you should have questions.
+        deny:
+          conditions:
+            any:
+              - key: "{{ request.object.spec.replicas }}"
+                operator: Equals
+                value: "{{ minavailable }}"
+    - name: minavailable-deployment-scale-vs-pdb
+      match:
+        any:
+          - resources:
+              kinds:
+                - Deployment/scale
+      context:
+        - name: parentdeploy # obtain deployment resource
+          apiCall:
+            urlPath: "/apis/apps/v1/namespaces/{{request.namespace}}/deployments?fieldSelector=metadata.name={{request.object.metadata.name}}"
+            jmesPath: "items[0]"
+        - name: minavailable # obtain value of minAvailable for the matching pdb of the deployment
+          apiCall:
+            urlPath: "/apis/policy/v1/namespaces/{{request.namespace}}/poddisruptionbudgets"
+            jmesPath: "items[?label_match(spec.selector.matchLabels, `{{parentdeploy.spec.template.metadata.labels}}`)] | [0] | spec.minAvailable || `0`"
+      validate:
+        message: >-
+          The matching PodDisruptionBudget for the scale of this Deployment has its minAvailable value equal or greater than to the replica count which is not permitted.
+          Please seek a member of the Application Platform Team if you should have questions.
+        deny:
+          conditions:
+            any:
+              - key: "{{ request.object.spec.replicas }}"
+                operator: Equals
+                value: "{{ minavailable }}"
+              - key: "{{ request.object.spec.replicas }}"
+                operator: LessThan
+                value: "{{ minavailable }}"
+    - name: minavailable-statfulset-scale-vs-pdb
+      match:
+        any:
+          - resources:
+              kinds:
+                - StatefulSet/scale
+      context:
+        - name: parentdeploy
+          apiCall:
+            urlPath: "/apis/apps/v1/namespaces/{{request.namespace}}/statefulsets?fieldSelector=metadata.name={{request.object.metadata.name}}"
+            jmesPath: "items[0]"
+        - name: minavailable
+          apiCall:
+            urlPath: "/apis/policy/v1/namespaces/{{request.namespace}}/poddisruptionbudgets"
+            jmesPath: "items[?label_match(spec.selector.matchLabels, `{{parentdeploy.spec.template.metadata.labels}}`)] | [0] | spec.minAvailable || `0`"
+      validate:
+        message: >-
+          The matching PodDisruptionBudget for the scale of this StatefulSet has its minAvailable value equal or greater than to the replica count which is not permitted.
+          Please seek a member of the Application Platform Team if you should have questions.
+        deny:
+          conditions:
+            any:
+              - key: "{{ request.object.spec.replicas }}"
+                operator: Equals
+                value: "{{ minavailable }}"
+              - key: "{{ request.object.spec.replicas }}"
+                operator: LessThan
+                value: "{{ minavailable }}"
+    - name: minavailable-pdb-vs-deployment
+      match:
+        any:
+          - resources:
+              kinds:
+                - PodDisruptionBudget
+      preconditions:
+        all:
+          - key: "{{request.operation || 'BACKGROUND'}}"
+            operator: AnyIn
+            value:
+              - CREATE
+              - UPDATE
+          - key: "{{ request.object.spec.minAvailable || `1` }}"
+            operator: GreaterThan
+            value: 0
+          - key: "{{ deployment_count }}" # check if a deployment matching the pdb exists
+            operator: GreaterThan
+            value: 0
+      context:
+        - name: deployment_count
+          apiCall:
+            urlPath: "/apis/apps/v1/namespaces/{{request.namespace}}/deployments"
+            jmesPath: "items[?label_match(spec.template.metadata.labels, `{{request.object.spec.selector.matchLabels}}`)] || `[]` | length(@)"
+        - name: deploymentReplicas
+          apiCall:
+            urlPath: "/apis/apps/v1/namespaces/{{request.namespace}}/deployments"
+            jmesPath: "items[?label_match(spec.template.metadata.labels, `{{request.object.spec.selector.matchLabels}}`)] | [0] | spec.replicas || `0`"
+      validate:
+        message: >-
+          The matching Deployment for this {{ request.object.kind }} with minAvailable {{ request.object.spec.minAvailable }} is greater or equal to the replica count of {{ deploymentReplicas }} which is not permitted.
+          Please seek a member of the Application Platform Team if you should have questions.
+        deny:
+          conditions:
+            any:
+              - key: "{{ request.object.spec.minAvailable }}"
+                operator: Equals
+                value: "{{ deploymentReplicas }}"
+              - key: "{{ request.object.spec.minAvailable }}"
+                operator: GreaterThan
+                value: "{{ deploymentReplicas }}"
+    - name: minavailable-pdb-vs-statefulset
+      match:
+        any:
+          - resources:
+              kinds:
+                - PodDisruptionBudget
+      preconditions:
+        all:
+          - key: "{{request.operation || 'BACKGROUND'}}"
+            operator: AnyIn
+            value:
+              - CREATE
+              - UPDATE
+          - key: "{{ request.object.spec.minAvailable || `1` }}"
+            operator: GreaterThan
+            value: 0
+          - key: "{{ statefulset_count }}" # check if a statefulset matching the pdb exists
+            operator: GreaterThan
+            value: 0
+      context:
+        - name: statefulset_count
+          apiCall:
+            urlPath: "/apis/apps/v1/namespaces/{{request.namespace}}/statefulsets"
+            jmesPath: "items[?label_match(spec.template.metadata.labels, `{{request.object.spec.selector.matchLabels}}`)] || `[]` | length(@)"
+        - name: statefulsetReplicas
+          apiCall:
+            urlPath: "/apis/apps/v1/namespaces/{{request.namespace}}/statefulsets"
+            jmesPath: "items[?label_match(spec.template.metadata.labels, `{{request.object.spec.selector.matchLabels}}`)] | [0] | spec.replicas || `0`"
+      validate:
+        message: >-
+          The matching StatefulSet for this {{ request.object.kind }} with minAvailable {{ request.object.spec.minAvailable }} is greater or equal to the replica count of {{ statefulsetReplicas }} which is not permitted.
+          Please seek a member of the Application Platform Team if you should have questions.
+        deny:
+          conditions:
+            any:
+              - key: "{{ request.object.spec.minAvailable }}"
+                operator: Equals
+                value: "{{ statefulsetReplicas }}"
+              - key: "{{ request.object.spec.minAvailable }}"
+                operator: GreaterThan
+                value: "{{ statefulsetReplicas }}"
