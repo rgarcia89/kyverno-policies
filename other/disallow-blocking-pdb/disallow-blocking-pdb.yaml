@@ -5,7 +5,7 @@ metadata:
   annotations:
     policies.kyverno.io/title: Check PodDisruptionBudget aligns with Deployment or StatefulSet and vice-versa
     policies.kyverno.io/category: Other
-    kyverno.io/kyverno-version: 1.9.0
+    kyverno.io/kyverno-version: 1.12.2
     kyverno.io/kubernetes-version: "1.24"
     policies.kyverno.io/subject: PodDisruptionBudget, Deployment, StatefulSet
     policies.kyverno.io/description: >-
@@ -57,6 +57,11 @@ spec:
           - resources:
               kinds:
                 - Deployment/scale
+      preconditions:
+        any:
+        - key: "{{ request.object.spec.replicas || `0` }}"
+          operator: NotEquals
+          value: 0
       context:
         - name: parentdeploy # obtain deployment resource
           apiCall:
@@ -85,6 +90,11 @@ spec:
           - resources:
               kinds:
                 - StatefulSet/scale
+      preconditions:
+        any:
+        - key: "{{ request.object.spec.replicas || `0` }}"
+          operator: NotEquals
+          value: 0
       context:
         - name: parentdeploy
           apiCall:
